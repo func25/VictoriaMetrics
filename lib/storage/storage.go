@@ -1342,7 +1342,7 @@ var ErrDeadlineExceeded = fmt.Errorf("deadline exceeded")
 // an error will be returned. Otherwise, the funciton returns the number of
 // metrics deleted.
 func (s *Storage) DeleteSeries(qt *querytracer.Tracer, tfss []*TagFilters, maxMetrics int) (int, error) {
-	so := getSearchOptions(noDeadline, "delete_series")
+	so := getSearchOptions(noDeadline, "/api/v1/admin/tsdb/delete_series")
 	defer putSearchOptions(so)
 
 	deletedCount, err := s.idb().DeleteTSIDs(qt, tfss, maxMetrics, so)
@@ -1361,7 +1361,7 @@ func (s *Storage) DeleteSeries(qt *querytracer.Tracer, tfss []*TagFilters, maxMe
 func (s *Storage) SearchLabelNamesWithFiltersOnTimeRange(qt *querytracer.Tracer, accountID, projectID uint32, tfss []*TagFilters, tr TimeRange,
 	maxLabelNames, maxMetrics int, deadline uint64,
 ) ([]string, error) {
-	so := getSearchOptions(deadline, "search_label_names")
+	so := getSearchOptions(deadline, "/api/v1/labels")
 	defer putSearchOptions(so)
 	return s.idb().SearchLabelNamesWithFiltersOnTimeRange(qt, accountID, projectID, tfss, tr, maxLabelNames, maxMetrics, so)
 }
@@ -1370,7 +1370,7 @@ func (s *Storage) SearchLabelNamesWithFiltersOnTimeRange(qt *querytracer.Tracer,
 func (s *Storage) SearchLabelValuesWithFiltersOnTimeRange(qt *querytracer.Tracer, accountID, projectID uint32, labelName string, tfss []*TagFilters,
 	tr TimeRange, maxLabelValues, maxMetrics int, deadline uint64,
 ) ([]string, error) {
-	so := getSearchOptions(deadline, "search_label_values")
+	so := getSearchOptions(deadline, "/api/v1/label/{}/values")
 	defer putSearchOptions(so)
 
 	idb := s.idb()
@@ -1629,7 +1629,7 @@ func (s *Storage) SearchTenants(qt *querytracer.Tracer, tr TimeRange, deadline u
 
 // GetTSDBStatus returns TSDB status data for /api/v1/status/tsdb
 func (s *Storage) GetTSDBStatus(qt *querytracer.Tracer, accountID, projectID uint32, tfss []*TagFilters, date uint64, focusLabel string, topN, maxMetrics int, deadline uint64) (*TSDBStatus, error) {
-	so := getSearchOptions(deadline, "tsdb_status")
+	so := getSearchOptions(deadline, "/api/v1/status/tsdb")
 	defer putSearchOptions(so)
 	return s.idb().GetTSDBStatus(qt, accountID, projectID, tfss, date, focusLabel, topN, maxMetrics, so)
 }
