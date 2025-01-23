@@ -32,9 +32,6 @@ type Deduplicator struct {
 
 	// time to wait after interval end before flush
 	flushAfter atomic.Pointer[histogram.Fast]
-
-	flushDuration *metrics.Histogram
-	flushTimeouts *metrics.Counter
 }
 
 // NewDeduplicator returns new deduplicator, which deduplicates samples per each time series.
@@ -77,8 +74,8 @@ func NewDeduplicator(pushFunc PushFunc, enableWindows bool, interval time.Durati
 		return float64(d.da.itemsCount())
 	})
 
-	d.flushDuration = ms.NewHistogram(fmt.Sprintf(`vm_streamaggr_dedup_flush_duration_seconds{%s}`, metricLabels))
-	d.flushTimeouts = ms.NewCounter(fmt.Sprintf(`vm_streamaggr_dedup_flush_timeouts_total{%s}`, metricLabels))
+	d.da.flushDuration = ms.NewHistogram(fmt.Sprintf(`vm_streamaggr_dedup_flush_duration_seconds{%s}`, metricLabels))
+	d.da.flushTimeouts = ms.NewCounter(fmt.Sprintf(`vm_streamaggr_dedup_flush_timeouts_total{%s}`, metricLabels))
 
 	metrics.RegisterSet(ms)
 
@@ -230,12 +227,15 @@ func (d *Deduplicator) flush(pushFunc PushFunc) {
 		deadlineTime = deadlineTime.Add(d.interval)
 	}
 	current.deadline = deadlineTime.UnixMilli()
+	if d.enableWindows {
+		current.isGreen = !current.isGreen
+	}
 	d.current.Store(current)
 
 	duration := time.Since(startTime)
-	d.flushDuration.Update(duration.Seconds())
+	d.da.flushDuration.Update(duration.Seconds())
 	if duration > d.interval {
-		d.flushTimeouts.Inc()
+		d.da.flushTimeouts.Inc()
 		logger.Warnf("deduplication couldn't be finished in the configured dedupInterval=%s; it took %.03fs; "+
 			"possible solutions: increase dedupInterval; reduce samples' ingestion rate", d.interval, duration.Seconds())
 	}
