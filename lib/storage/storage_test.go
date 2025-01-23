@@ -524,7 +524,7 @@ func TestNextRetentionDeadlineSeconds(t *testing.T) {
 func TestStorageOpenClose(t *testing.T) {
 	path := "TestStorageOpenClose"
 	for i := 0; i < 10; i++ {
-		s := MustOpenStorage(path, -1, 1e5, 1e6)
+		s := MustOpenStorage(path, StorageOptions{Retention: -1, MaxHourlySeries: 1e5, MaxDailySeries: 1e6})
 		s.MustClose()
 	}
 	if err := os.RemoveAll(path); err != nil {
@@ -535,14 +535,14 @@ func TestStorageOpenClose(t *testing.T) {
 func TestStorageRandTimestamps(t *testing.T) {
 	path := "TestStorageRandTimestamps"
 	retention := 10 * retention31Days
-	s := MustOpenStorage(path, retention, 0, 0)
+	s := MustOpenStorage(path, StorageOptions{Retention: retention})
 	t.Run("serial", func(t *testing.T) {
 		for i := 0; i < 3; i++ {
 			if err := testStorageRandTimestamps(s); err != nil {
 				t.Fatalf("error on iteration %d: %s", i, err)
 			}
 			s.MustClose()
-			s = MustOpenStorage(path, retention, 0, 0)
+			s = MustOpenStorage(path, StorageOptions{Retention: retention})
 		}
 	})
 	t.Run("concurrent", func(t *testing.T) {
@@ -614,7 +614,7 @@ func testStorageRandTimestamps(s *Storage) error {
 
 func TestStorageDeleteSeries(t *testing.T) {
 	path := "TestStorageDeleteSeries"
-	s := MustOpenStorage(path, 0, 0, 0)
+	s := MustOpenStorage(path, StorageOptions{})
 
 	// Verify no label names exist
 	lns, err := s.SearchLabelNamesWithFiltersOnTimeRange(nil, nil, TimeRange{}, 1e5, 1e9, noDeadline)
@@ -634,7 +634,7 @@ func TestStorageDeleteSeries(t *testing.T) {
 			// Re-open the storage in order to check how deleted metricIDs
 			// are persisted.
 			s.MustClose()
-			s = MustOpenStorage(path, 0, 0, 0)
+			s = MustOpenStorage(path, StorageOptions{})
 		}
 	})
 
@@ -835,7 +835,7 @@ func TestStorageDeleteSeries_TooManyTimeseries(t *testing.T) {
 		MaxTimestamp: time.Now().UnixMilli(),
 	})
 
-	s := MustOpenStorage(t.Name(), 0, 0, 0)
+	s := MustOpenStorage(t.Name(), StorageOptions{})
 	defer s.MustClose()
 	s.AddRows(mrs, defaultPrecisionBits)
 	s.DebugFlush()
@@ -876,7 +876,7 @@ func TestStorageDeleteSeries_CachesAreUpdatedOrReset(t *testing.T) {
 		t.Fatalf("unexpected error in TagFilters.Add: %v", err)
 	}
 	tfss := []*TagFilters{tfs}
-	s := MustOpenStorage(t.Name(), 0, 0, 0)
+	s := MustOpenStorage(t.Name(), StorageOptions{})
 	defer s.MustClose()
 
 	// Ensure caches are empty.
@@ -941,7 +941,7 @@ func TestStorageDeleteSeries_CachesAreUpdatedOrReset(t *testing.T) {
 
 func TestStorageRegisterMetricNamesSerial(t *testing.T) {
 	path := "TestStorageRegisterMetricNamesSerial"
-	s := MustOpenStorage(path, 0, 0, 0)
+	s := MustOpenStorage(path, StorageOptions{})
 	if err := testStorageRegisterMetricNames(s); err != nil {
 		t.Fatalf("unexpected error: %s", err)
 	}
@@ -953,7 +953,7 @@ func TestStorageRegisterMetricNamesSerial(t *testing.T) {
 
 func TestStorageRegisterMetricNamesConcurrent(t *testing.T) {
 	path := "TestStorageRegisterMetricNamesConcurrent"
-	s := MustOpenStorage(path, 0, 0, 0)
+	s := MustOpenStorage(path, StorageOptions{})
 	ch := make(chan error, 3)
 	for i := 0; i < cap(ch); i++ {
 		go func() {
@@ -1100,7 +1100,7 @@ func TestStorageAddRowsSerial(t *testing.T) {
 	rng := rand.New(rand.NewSource(1))
 	path := "TestStorageAddRowsSerial"
 	retention := 10 * retention31Days
-	s := MustOpenStorage(path, retention, 1e5, 1e5)
+	s := MustOpenStorage(path, StorageOptions{Retention: retention, MaxHourlySeries: 1e5, MaxDailySeries: 1e5})
 	if err := testStorageAddRows(rng, s); err != nil {
 		t.Fatalf("unexpected error: %s", err)
 	}
@@ -1113,7 +1113,7 @@ func TestStorageAddRowsSerial(t *testing.T) {
 func TestStorageAddRowsConcurrent(t *testing.T) {
 	path := "TestStorageAddRowsConcurrent"
 	retention := 10 * retention31Days
-	s := MustOpenStorage(path, retention, 1e5, 1e5)
+	s := MustOpenStorage(path, StorageOptions{Retention: retention, MaxHourlySeries: 1e5, MaxDailySeries: 1e5})
 	ch := make(chan error, 3)
 	for i := 0; i < cap(ch); i++ {
 		go func(n int) {
@@ -1200,7 +1200,7 @@ func testStorageAddRows(rng *rand.Rand, s *Storage) error {
 
 	// Try opening the storage from snapshot.
 	snapshotPath := filepath.Join(s.path, snapshotsDirname, snapshotName)
-	s1 := MustOpenStorage(snapshotPath, 0, 0, 0)
+	s1 := MustOpenStorage(snapshotPath, StorageOptions{})
 
 	// Verify the snapshot contains rows
 	var m1 Metrics
@@ -1256,7 +1256,7 @@ func TestStorageRotateIndexDB(t *testing.T) {
 		MinTimestamp: time.Now().UTC().Add(-numRows * time.Hour).UnixMilli(),
 		MaxTimestamp: time.Now().UTC().UnixMilli(),
 	}
-	s := MustOpenStorage(t.Name(), 0, 0, 0)
+	s := MustOpenStorage(t.Name(), StorageOptions{})
 	defer s.MustClose()
 
 	insertAndRotateConcurrently := func(i int) (int, int) {
@@ -1325,7 +1325,7 @@ func TestStorageDeleteStaleSnapshots(t *testing.T) {
 	rng := rand.New(rand.NewSource(1))
 	path := "TestStorageDeleteStaleSnapshots"
 	retention := 10 * retention31Days
-	s := MustOpenStorage(path, retention, 1e5, 1e5)
+	s := MustOpenStorage(path, StorageOptions{Retention: retention, MaxHourlySeries: 1e5, MaxDailySeries: 1e5})
 	const rowsPerAdd = 1e3
 	const addsCount = 10
 	maxTimestamp := timestampFromTime(time.Now())
@@ -1400,7 +1400,7 @@ func TestStorageRowsNotAdded(t *testing.T) {
 
 		var gotMetrics Metrics
 		path := fmt.Sprintf("%s/%s", t.Name(), opts.name)
-		s := MustOpenStorage(path, opts.retention, 0, 0)
+		s := MustOpenStorage(path, StorageOptions{Retention: opts.retention})
 		defer s.MustClose()
 		s.AddRows(opts.mrs, defaultPrecisionBits)
 		s.DebugFlush()
@@ -1503,7 +1503,7 @@ func TestStorageRowsNotAdded_SeriesLimitExceeded(t *testing.T) {
 
 		var gotMetrics Metrics
 		path := fmt.Sprintf("%s/%s", t.Name(), name)
-		s := MustOpenStorage(path, 0, maxHourlySeries, maxDailySeries)
+		s := MustOpenStorage(path, StorageOptions{MaxHourlySeries: maxHourlySeries, MaxDailySeries: maxDailySeries})
 		defer s.MustClose()
 		s.AddRows(mrs, defaultPrecisionBits)
 		s.DebugFlush()
@@ -1587,7 +1587,7 @@ func TestStorageSearchMetricNames_TooManyTimeseries(t *testing.T) {
 	f := func(opts *options) {
 		t.Helper()
 
-		s := MustOpenStorage(t.Name()+"/"+opts.path, 0, 0, 0)
+		s := MustOpenStorage(t.Name()+"/"+opts.path, StorageOptions{})
 		defer s.MustClose()
 		s.AddRows(mrs, defaultPrecisionBits)
 		s.DebugFlush()
@@ -1833,7 +1833,7 @@ func testStorageVariousDataPatterns(t *testing.T, registerOnly bool, op func(s *
 		strict := concurrency == 1
 		rowsAddedTotal := wantCounts.metrics.RowsAddedTotal
 
-		s := MustOpenStorage(t.Name(), 0, 0, 0)
+		s := MustOpenStorage(t.Name(), StorageOptions{})
 
 		testDoConcurrently(s, op, concurrency, splitBatches, batches)
 		s.DebugFlush()
@@ -2192,4 +2192,52 @@ func testGenerateMetricRowBatches(opts *batchOptions) ([][]MetricRow, *counts) {
 		}
 	}
 	return batches, &want
+}
+
+func TestStorageMetricTracker(t *testing.T) {
+	defer testRemoveAll(t)
+	rng := rand.New(rand.NewSource(1))
+	numRows := uint64(1000)
+	minTimestamp := time.Now().UnixMilli()
+	maxTimestamp := minTimestamp + 1000
+	mrs := testGenerateMetricRows(rng, numRows, minTimestamp, maxTimestamp)
+
+	var gotMetrics Metrics
+	s := MustOpenStorage(t.Name(), StorageOptions{TrackMetricNamesStat: true})
+	defer s.MustClose()
+	s.AddRows(mrs, defaultPrecisionBits)
+	s.DebugFlush()
+	s.UpdateMetrics(&gotMetrics)
+
+	var sr Search
+	tr := TimeRange{
+		MinTimestamp: minTimestamp,
+		MaxTimestamp: maxTimestamp,
+	}
+
+	// check stats for metrics with 0 requests count
+	mus := s.GetMetricNamesUsageStats(nil, 10_000, 0, "")
+	if len(mus.Records) != int(numRows) {
+		t.Fatalf("unexpected Stats records count=%d, want %d records", len(mus.Records), numRows)
+	}
+
+	// search query for all ingested metrics
+	tfs := NewTagFilters()
+	if err := tfs.Add(nil, []byte("metric_.+"), false, true); err != nil {
+		t.Fatalf("unexpected error at tfs add: %s", err)
+	}
+
+	sr.Init(nil, s, []*TagFilters{tfs}, tr, 1e5, noDeadline)
+	for sr.NextMetricBlock() {
+	}
+	sr.MustClose()
+
+	mus = s.GetMetricNamesUsageStats(nil, 10_000, 0, "")
+	if len(mus.Records) != 0 {
+		t.Fatalf("unexpected Stats records count=%d; want 0 records", len(mus.Records))
+	}
+	mus = s.GetMetricNamesUsageStats(nil, 10_000, 1, "")
+	if len(mus.Records) != int(numRows) {
+		t.Fatalf("unexpected Stats records count=%d, want %d records", len(mus.Records), numRows)
+	}
 }
