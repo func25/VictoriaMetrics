@@ -146,7 +146,6 @@ func NewAlertingRule(qb datasource.QuerierBuilder, group *Group, cfg config.Rule
 		})
 	ar.metrics.seriesFetched = ar.metrics.set.GetOrCreateGauge(fmt.Sprintf(`vmalert_alerting_rules_last_evaluation_series_fetched{%s}`, labels),
 		func() float64 {
-			log.Printf("I'm from %s", ar.For)
 			e := ar.state.getLast()
 			if e.SeriesFetched == nil {
 				// means seriesFetched is unsupported
