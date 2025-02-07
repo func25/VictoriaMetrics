@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"hash/fnv"
-	"log"
 	"sort"
 	"strings"
 	"sync"
