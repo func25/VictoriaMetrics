@@ -256,7 +256,6 @@ func (g *Group) updateWith(newGroup *Group) error {
 		if err := or.updateWith(nr); err != nil {
 			return err
 		}
-		//todo: which callback will be used for gauge metrics?
 		nr.close()
 		delete(rulesRegistry, nr.ID())
 	}

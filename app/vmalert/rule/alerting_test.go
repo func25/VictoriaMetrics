@@ -1241,18 +1241,21 @@ func newTestRuleWithLabels(name string, labels ...string) *AlertingRule {
 }
 
 func newTestAlertingRule(name string, waitFor time.Duration) *AlertingRule {
-	m := newAlertingRuleMetrics()
-	m.errors = m.set.GetOrCreateCounter(fmt.Sprintf(`vmalert_alerting_rules_errors_total{alertname=%q}`, name))
-
 	rule := AlertingRule{
 		Name:         name,
 		For:          waitFor,
 		EvalInterval: waitFor,
 		alerts:       make(map[uint64]*notifier.Alert),
 		state:        &ruleState{entries: make([]StateEntry, 10)},
-		metrics:      m,
+		metrics:      getTestAlertingRuleMetrics(name),
 	}
 	return &rule
+}
+
+func getTestAlertingRuleMetrics(name string) *alertingRuleMetrics {
+	m := newAlertingRuleMetrics()
+	m.errors = m.set.GetOrCreateCounter(fmt.Sprintf(`vmalert_alerting_rules_errors_total{alertname=%q}`, name))
+	return m
 }
 
 func newTestAlertingRuleWithCustomFields(name string, waitFor, evalInterval, keepFiringFor time.Duration, annotation map[string]string) *AlertingRule {

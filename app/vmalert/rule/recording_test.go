@@ -305,15 +305,12 @@ func TestRecordingRuleLimit_Failure(t *testing.T) {
 
 		fq := &datasource.FakeQuerier{}
 		fq.Add(testMetrics...)
-		m := newRecordingRuleMetrics()
-		m.errors = m.set.GetOrCreateCounter(`vmalert_recording_rules_errors_total{alertname="job:foo"}`)
-
 		rule := &RecordingRule{Name: "job:foo",
 			state: &ruleState{entries: make([]StateEntry, 10)},
 			Labels: map[string]string{
 				"source": "test_limit",
 			},
-			metrics: m,
+			metrics: getTestRecordingRuleMetrics(),
 		}
 		rule.q = fq
 
@@ -343,14 +340,12 @@ func TestRecordingRuleLimit_Success(t *testing.T) {
 
 		fq := &datasource.FakeQuerier{}
 		fq.Add(testMetrics...)
-		newRecordingRuleMetrics().errors = newRecordingRuleMetrics().set.GetOrCreateCounter(`vmalert_recording_rules_errors_total{alertname="job:foo"}`)
-
 		rule := &RecordingRule{Name: "job:foo",
 			state: &ruleState{entries: make([]StateEntry, 10)},
 			Labels: map[string]string{
 				"source": "test_limit",
 			},
-			metrics: newRecordingRuleMetrics(),
+			metrics: getTestRecordingRuleMetrics(),
 		}
 		rule.q = fq
 
@@ -364,17 +359,20 @@ func TestRecordingRuleLimit_Success(t *testing.T) {
 	f(-1)
 }
 
-func TestRecordingRuleExec_Negative(t *testing.T) {
+func getTestRecordingRuleMetrics() *recordingRuleMetrics {
 	m := newRecordingRuleMetrics()
 	m.errors = m.set.GetOrCreateCounter(`vmalert_recording_rules_errors_total{alertname="job:foo"}`)
+	return m
+}
 
+func TestRecordingRuleExec_Negative(t *testing.T) {
 	rr := &RecordingRule{
 		Name: "job:foo",
 		Labels: map[string]string{
 			"job": "test",
 		},
 		state:   &ruleState{entries: make([]StateEntry, 10)},
-		metrics: m,
+		metrics: getTestRecordingRuleMetrics(),
 	}
 	fq := &datasource.FakeQuerier{}
 	expErr := "connection reset by peer"
