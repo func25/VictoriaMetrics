@@ -61,7 +61,6 @@ app-via-docker-windows: package-builder
 			-o bin/$(APP_NAME)-windows$(APP_SUFFIX)-prod.exe $(PKG_PREFIX)/app/$(APP_NAME)
 
 package-via-docker: package-base
-	($(DOCKER_IMAGE_LS) | grep -q '$(DOCKER_NAMESPACE)/$(APP_NAME):$(PKG_TAG)$(APP_SUFFIX)$(RACE)$$') || (\
 		$(MAKE) app-via-docker && \
 		$(DOCKER_BUILD) \
 			--build-arg src_binary=$(APP_NAME)$(APP_SUFFIX)-prod \
@@ -73,7 +72,7 @@ package-via-docker: package-base
 			--label "org.opencontainers.image.version=$(PKG_TAG)" \
 			--label "org.opencontainers.image.created=$(shell date -u +"%Y-%m-%dT%H:%M:%SZ")" \
 			--tag $(DOCKER_NAMESPACE)/$(APP_NAME):$(PKG_TAG)$(APP_SUFFIX)$(RACE) \
-			-f app/$(APP_NAME)/deployment/Dockerfile bin)
+			-f app/$(APP_NAME)/deployment/Dockerfile bin
 
 publish-via-docker:
 	$(MAKE_PARALLEL) app-via-docker-linux-amd64 \
