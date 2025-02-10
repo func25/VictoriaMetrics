@@ -281,17 +281,33 @@ func getTimestamps(start, end, step int64, maxPointsPerSeries int) []int64 {
 	return timestamps
 }
 
+// evalExpr đánh giá một biểu thức PromQL và trả về kết quả dạng time series.
+// Hàm này là wrapper chính cho việc đánh giá biểu thức, thực hiện:
+// 1. Thiết lập query tracing
+// 2. Gọi evalExprInternal để thực hiện đánh giá
+// 3. Ghi log kết quả thực thi
+//
+// Tham số:
+// - qt: Query tracer để theo dõi quá trình thực thi
+// - ec: Cấu hình đánh giá (thời gian, bước, giới hạn)
+// - e: Biểu thức PromQL đã được parse thành AST
 func evalExpr(qt *querytracer.Tracer, ec *EvalConfig, e metricsql.Expr) ([]*timeseries, error) {
+	// Thiết lập query tracing nếu được bật
 	if qt.Enabled() {
 		query := string(e.AppendString(nil))
+		// Giới hạn độ dài query trong log để tránh log quá dài
 		query = stringsutil.LimitStringLen(query, 300)
 		mayCache := ec.mayCache()
 		qt = qt.NewChild("eval: query=%s, timeRange=%s, step=%d, mayCache=%v", query, ec.timeRangeString(), ec.Step, mayCache)
 	}
+
+	// Thực hiện đánh giá biểu thức
 	rv, err := evalExprInternal(qt, ec, e)
 	if err != nil {
 		return nil, err
 	}
+
+	// Log thống kê về kết quả nếu tracing được bật
 	if qt.Enabled() {
 		seriesCount := len(rv)
 		pointsPerSeries := 0
@@ -304,8 +320,19 @@ func evalExpr(qt *querytracer.Tracer, ec *EvalConfig, e metricsql.Expr) ([]*time
 	return rv, nil
 }
 
+// evalExprInternal thực hiện đánh giá chi tiết các loại biểu thức PromQL.
+// Hàm này xử lý các loại biểu thức khác nhau:
+// - MetricExpr: Truy vấn metrics trực tiếp
+// - RollupExpr: Biểu thức có time window, offset hoặc @ modifier
+// - FuncExpr: Các hàm transform hoặc rollup
+// - AggrFuncExpr: Các hàm aggregate (sum, avg, etc.)
+// - BinaryOpExpr: Các phép toán hai ngôi (+, -, *, etc.)
+// - NumberExpr, StringExpr, DurationExpr: Các giá trị hằng số
 func evalExprInternal(qt *querytracer.Tracer, ec *EvalConfig, e metricsql.Expr) ([]*timeseries, error) {
+	// Xử lý MetricExpr - truy vấn metrics trực tiếp
+	// VD: node_cpu_seconds_total
 	if me, ok := e.(*metricsql.MetricExpr); ok {
+		// Chuyển đổi thành RollupExpr để xử lý chuỗi thời gian
 		re := &metricsql.RollupExpr{
 			Expr: me,
 		}
@@ -315,6 +342,9 @@ func evalExprInternal(qt *querytracer.Tracer, ec *EvalConfig, e metricsql.Expr) 
 		}
 		return rv, nil
 	}
+
+	// Xử lý RollupExpr - biểu thức có time window, offset hoặc @ modifier
+	// VD: node_cpu_seconds_total[5m] offset 1h @ end()
 	if re, ok := e.(*metricsql.RollupExpr); ok {
 		rv, err := evalRollupFunc(qt, ec, "default_rollup", rollupDefault, e, re, nil)
 		if err != nil {
@@ -322,14 +352,20 @@ func evalExprInternal(qt *querytracer.Tracer, ec *EvalConfig, e metricsql.Expr) 
 		}
 		return rv, nil
 	}
+
+	// Xử lý FuncExpr - các hàm transform hoặc rollup
+	// VD: abs(node_cpu_seconds_total)
 	if fe, ok := e.(*metricsql.FuncExpr); ok {
+		// Kiểm tra xem có phải hàm rollup không
 		nrf := getRollupFunc(fe.Name)
 		if nrf == nil {
+			// Nếu không phải hàm rollup, xử lý như hàm transform
 			qtChild := qt.NewChild("transform %s()", fe.Name)
 			rv, err := evalTransformFunc(qtChild, ec, fe)
 			qtChild.Donef("series=%d", len(rv))
 			return rv, err
 		}
+		// Xử lý hàm rollup
 		args, re, err := evalRollupFuncArgs(qt, ec, fe)
 		if err != nil {
 			return nil, err
@@ -344,32 +380,48 @@ func evalExprInternal(qt *querytracer.Tracer, ec *EvalConfig, e metricsql.Expr) 
 		}
 		return rv, nil
 	}
+
+	// Xử lý AggrFuncExpr - các hàm aggregate
+	// VD: sum(node_cpu_seconds_total)
 	if ae, ok := e.(*metricsql.AggrFuncExpr); ok {
 		qtChild := qt.NewChild("aggregate %s()", ae.Name)
 		rv, err := evalAggrFunc(qtChild, ec, ae)
 		qtChild.Donef("series=%d", len(rv))
 		return rv, err
 	}
+
+	// Xử lý BinaryOpExpr - các phép toán hai ngôi
+	// VD: node_cpu_seconds_total * 2
 	if be, ok := e.(*metricsql.BinaryOpExpr); ok {
 		qtChild := qt.NewChild("binary op %q", be.Op)
 		rv, err := evalBinaryOp(qtChild, ec, be)
 		qtChild.Donef("series=%d", len(rv))
 		return rv, err
 	}
+
+	// Xử lý NumberExpr - giá trị số
+	// VD: 123
 	if ne, ok := e.(*metricsql.NumberExpr); ok {
 		rv := evalNumber(ec, ne.N)
 		return rv, nil
 	}
+
+	// Xử lý StringExpr - chuỗi
+	// VD: "abc"
 	if se, ok := e.(*metricsql.StringExpr); ok {
 		rv := evalString(ec, se.S)
 		return rv, nil
 	}
+
+	// Xử lý DurationExpr - khoảng thời gian
+	// VD: 5m
 	if de, ok := e.(*metricsql.DurationExpr); ok {
 		d := de.Duration(ec.Step)
 		dSec := float64(d) / 1000
 		rv := evalNumber(ec, dSec)
 		return rv, nil
 	}
+
 	return nil, fmt.Errorf("unexpected expression %q", e.AppendString(nil))
 }
 
@@ -855,36 +907,61 @@ func evalRollupFunc(qt *querytracer.Tracer, ec *EvalConfig, funcName string, rf 
 	return tss, nil
 }
 
+// evalRollupFuncWithoutAt đánh giá các hàm rollup không có modifier @ (ví dụ: rate(metric[5m])).
+// Hàm này xử lý các trường hợp:
+// - Rollup với offset (ví dụ: rate(metric[5m] offset 1h))
+// - Rollup với candlestick (OHLC - Open/High/Low/Close)
+// - Rollup trên metric trực tiếp (ví dụ: rate(metric[5m]))
+// - Rollup trên subquery (ví dụ: rate(sum_over_time(metric[5m])[10m:1m]))
+//
+// Tham số:
+// - qt: Query tracer để theo dõi quá trình thực thi
+// - ec: Cấu hình đánh giá (thời gian, bước, giới hạn)
+// - funcName: Tên hàm rollup (rate, increase, avg_over_time,...)
+// - rf: Hàm rollup cụ thể được sử dụng
+// - expr: Biểu thức PromQL gốc
+// - re: Biểu thức rollup đang được xử lý
+// - iafc: Context cho incremental aggregation (nếu có)
 func evalRollupFuncWithoutAt(qt *querytracer.Tracer, ec *EvalConfig, funcName string, rf rollupFunc,
 	expr metricsql.Expr, re *metricsql.RollupExpr, iafc *incrementalAggrFuncContext) ([]*timeseries, error) {
+	// Chuyển tên hàm về lowercase để chuẩn hóa
 	funcName = strings.ToLower(funcName)
 	ecNew := ec
 	var offset int64
+
+	// Xử lý offset nếu có (ví dụ: rate(m[5m] offset 1h))
 	if re.Offset != nil {
 		offset = re.Offset.Duration(ec.Step)
 		ecNew = copyEvalConfig(ecNew)
 		ecNew.Start -= offset
 		ecNew.End -= offset
-		// There is no need in calling AdjustStartEnd() on ecNew if ecNew.MayCache is set to true,
-		// since the time range alignment has been already performed by the caller,
-		// so cache hit rate should be quite good.
-		// See also https://github.com/VictoriaMetrics/VictoriaMetrics/issues/976
+		// Không cần gọi AdjustStartEnd() trên ecNew nếu ecNew.MayCache = true
+		// vì time range alignment đã được thực hiện bởi caller
+		// nên cache hit rate sẽ khá tốt
+		// Xem thêm: https://github.com/VictoriaMetrics/VictoriaMetrics/issues/976
 	}
+
+	// Xử lý đặc biệt cho hàm rollup_candlestick (OHLC)
 	if funcName == "rollup_candlestick" {
-		// Automatically apply `offset -step` to `rollup_candlestick` function
-		// in order to obtain expected OHLC results.
-		// See https://github.com/VictoriaMetrics/VictoriaMetrics/issues/309#issuecomment-582113462
+		// Tự động áp dụng `offset -step` cho hàm `rollup_candlestick`
+		// để có kết quả OHLC như mong đợi
+		// Xem: https://github.com/VictoriaMetrics/VictoriaMetrics/issues/309#issuecomment-582113462
 		step := ecNew.Step
 		ecNew = copyEvalConfig(ecNew)
 		ecNew.Start += step
 		ecNew.End += step
 		offset -= step
 	}
+
 	var rvs []*timeseries
 	var err error
+
+	// Xử lý rollup trên metric trực tiếp hoặc subquery
 	if me, ok := re.Expr.(*metricsql.MetricExpr); ok {
+		// Trường hợp metric trực tiếp (ví dụ: rate(metric[5m]))
 		rvs, err = evalRollupFuncWithMetricExpr(qt, ecNew, funcName, rf, expr, me, iafc, re.Window)
 	} else {
+		// Trường hợp subquery
 		if iafc != nil {
 			logger.Panicf("BUG: iafc must be nil for rollup %q over subquery %q", funcName, re.AppendString(nil))
 		}
@@ -895,12 +972,18 @@ func evalRollupFuncWithoutAt(qt *querytracer.Tracer, ec *EvalConfig, funcName st
 			Err: err,
 		}
 	}
+
+	// Xử lý đặc biệt cho absent_over_time
 	if funcName == "absent_over_time" {
 		rvs = aggregateAbsentOverTime(ecNew, re.Expr, rvs)
 	}
+
+	// Cập nhật trạng thái partial response
 	ec.updateIsPartialResponse(ecNew.IsPartialResponse.Load())
+
+	// Điều chỉnh timestamps nếu có offset
 	if offset != 0 && len(rvs) > 0 {
-		// Make a copy of timestamps, since they may be used in other values.
+		// Tạo bản sao của timestamps vì chúng có thể được sử dụng trong các values khác
 		srcTimestamps := rvs[0].Timestamps
 		dstTimestamps := append([]int64{}, srcTimestamps...)
 		for i := range dstTimestamps {
@@ -1622,16 +1705,45 @@ var (
 	memoryIntensiveQueries = metrics.NewCounter(`vm_memory_intensive_queries_total`)
 )
 
+// evalRollupFuncWithMetricExpr đánh giá các hàm rollup trên metric trực tiếp (không qua subquery).
+// Hàm này xử lý 2 trường hợp chính:
+// 1. Instant query (ec.Start == ec.End): Sử dụng evalInstantRollup với tối ưu cache đặc biệt
+// 2. Range query: Sử dụng cache thông thường hoặc evalRollupFuncNoCache nếu cache bị tắt
+//
+// Ví dụ:
+// - rate(node_cpu_seconds_total[5m]) # Range query bình thường
+// - rate(node_cpu_seconds_total[5m] @ 1234567890) # Instant query với timestamp cụ thể
+//
+// Cơ chế cache:
+// - Kết quả được cache theo window và expression
+// - Cache có thể hit toàn phần (full) hoặc một phần (partial)
+// - Nếu partial hit, sẽ tính toán phần còn thiếu và merge với kết quả cache
+//
+// Tham số:
+// - qt: Query tracer để theo dõi quá trình thực thi
+// - ec: Cấu hình đánh giá (thời gian, bước, giới hạn)
+// - funcName: Tên hàm rollup (rate, increase, avg_over_time,...)
+// - rf: Hàm rollup cụ thể được sử dụng
+// - expr: Biểu thức PromQL gốc
+// - me: Biểu thức metric đang được xử lý
+// - iafc: Context cho incremental aggregation (nếu có)
+// - windowExpr: Cửa sổ thời gian cho rollup (ví dụ [5m])
 func evalRollupFuncWithMetricExpr(qt *querytracer.Tracer, ec *EvalConfig, funcName string, rf rollupFunc,
 	expr metricsql.Expr, me *metricsql.MetricExpr, iafc *incrementalAggrFuncContext, windowExpr *metricsql.DurationExpr) ([]*timeseries, error) {
+	// Parse window duration từ windowExpr, đảm bảo window không âm
+	// Ví dụ: [5m] -> 300000 milliseconds
 	window, err := windowExpr.NonNegativeDuration(ec.Step)
 	if err != nil {
 		return nil, fmt.Errorf("cannot parse lookbehind window in square brackets at %s: %w", expr.AppendString(nil), err)
 	}
+
+	// Nếu metric expression rỗng (không có selector), trả về NaN
 	if me.IsEmpty() {
 		return evalNumber(ec, nan), nil
 	}
 
+	// Xử lý instant query (ec.Start == ec.End)
+	// Ví dụ: rate(metric[5m] @ 1234567890)
 	if ec.Start == ec.End {
 		rvs, err := evalInstantRollup(qt, ec, funcName, rf, expr, me, iafc, window)
 		if err != nil {
@@ -1642,7 +1754,12 @@ func evalRollupFuncWithMetricExpr(qt *querytracer.Tracer, ec *EvalConfig, funcNa
 		}
 		return rvs, nil
 	}
+
+	// Tính số điểm dữ liệu cho mỗi time series
+	// Công thức: (end - start)/step + 1
 	pointsPerSeries := 1 + (ec.End-ec.Start)/ec.Step
+
+	// Hàm helper để đánh giá rollup không sử dụng cache
 	evalWithConfig := func(ec *EvalConfig) ([]*timeseries, error) {
 		tss, err := evalRollupFuncNoCache(qt, ec, funcName, rf, expr, me, iafc, window, pointsPerSeries)
 		if err != nil {
@@ -1653,47 +1770,57 @@ func evalRollupFuncWithMetricExpr(qt *querytracer.Tracer, ec *EvalConfig, funcNa
 		}
 		return tss, nil
 	}
+
+	// Nếu cache bị tắt, thực hiện tính toán trực tiếp không qua cache
 	if !ec.mayCache() {
 		qt.Printf("do not fetch series from cache, since it is disabled in the current context")
 		return evalWithConfig(ec)
 	}
 
-	// Search for cached results.
+	// Tìm kiếm kết quả trong cache
+	// Trả về:
+	// - tssCached: các time series đã cache
+	// - start: timestamp bắt đầu của dữ liệu cache
 	tssCached, start := rollupResultCacheV.GetSeries(qt, ec, expr, window)
 	ec.QueryStats.addSeriesFetched(len(tssCached))
+
+	// Xử lý các trường hợp cache hit
 	if start > ec.End {
+		// Cache chứa toàn bộ kết quả cần thiết
 		qt.Printf("the result is fully cached")
 		rollupResultCacheFullHits.Inc()
 		return tssCached, nil
 	}
 	if start > ec.Start {
+		// Cache chỉ chứa một phần kết quả
 		qt.Printf("partial cache hit")
 		rollupResultCachePartialHits.Inc()
 	} else {
+		// Cache miss hoàn toàn
 		qt.Printf("cache miss")
 		rollupResultCacheMiss.Inc()
 	}
 
-	// Fetch missing results, which aren't cached yet.
+	// Tính toán phần dữ liệu còn thiếu (không có trong cache)
 	ecNew := ec
 	if start != ec.Start {
 		ecNew = copyEvalConfig(ec)
 		ecNew.Start = start
 	}
-	// call to evalWithConfig also updates QueryStats.addSeriesFetched
-	// without checking whether tss has intersection with tssCached.
-	// So final number could be bigger than actual number of unique series.
-	// This discrepancy is acceptable, since seriesFetched stat is used as info only.
+	// Lưu ý: Gọi evalWithConfig cũng cập nhật QueryStats.addSeriesFetched
+	// mà không kiểm tra xem tss có trùng với tssCached hay không.
+	// Do đó số series cuối cùng có thể lớn hơn số series thực tế.
+	// Sự khác biệt này chấp nhận được vì seriesFetched chỉ dùng để thông tin.
 	tss, err := evalWithConfig(ecNew)
 	if err != nil {
 		return nil, err
 	}
 	isPartial := ecNew.IsPartialResponse.Load()
 
-	// Merge cached results with the fetched additional results.
+	// Merge kết quả từ cache với kết quả mới tính toán
 	rvs, ok := mergeSeries(qt, tssCached, tss, start, ec)
 	if !ok {
-		// Cannot merge series - fall back to non-cached querying.
+		// Không thể merge series - fallback về tính toán không cache
 		qt.Printf("fall back to non-caching querying")
 		rvs, err = evalWithConfig(ec)
 		if err != nil {
@@ -1702,6 +1829,8 @@ func evalRollupFuncWithMetricExpr(qt *querytracer.Tracer, ec *EvalConfig, funcNa
 		isPartial = ec.IsPartialResponse.Load()
 	}
 	ec.updateIsPartialResponse(isPartial)
+
+	// Lưu kết quả vào cache nếu không phải partial response
 	if !isPartial {
 		rollupResultCacheV.PutSeries(qt, ec, expr, window, rvs)
 	}

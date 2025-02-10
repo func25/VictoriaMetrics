@@ -33,8 +33,20 @@ var (
 		"Such conversion can be disabled using -search.disableImplicitConversion.")
 )
 
-// Exec executes q for the given ec.
+// Exec thực thi một truy vấn PromQL với cấu hình được cung cấp.
+// Các bước thực hiện:
+// 1. Ghi nhận thống kê query nếu được bật
+// 2. Parse và optimize query
+// 3. Thực thi query và xử lý kết quả
+// 4. Áp dụng các điều chỉnh cuối cùng (first point only, sorting, rounding)
+//
+// Tham số:
+// - qt: Query tracer để theo dõi quá trình thực thi
+// - ec: Cấu hình đánh giá query (thời gian, bước, giới hạn, etc.)
+// - q: Chuỗi truy vấn PromQL
+// - isFirstPointOnly: Chỉ lấy điểm dữ liệu đầu tiên của mỗi time series
 func Exec(qt *querytracer.Tracer, ec *EvalConfig, q string, isFirstPointOnly bool) ([]netstorage.Result, error) {
+	// Ghi nhận thống kê thời gian thực thi nếu tính năng này được bật
 	if querystats.Enabled() {
 		startTime := time.Now()
 		defer func() {
@@ -48,17 +60,21 @@ func Exec(qt *querytracer.Tracer, ec *EvalConfig, q string, isFirstPointOnly boo
 		}()
 	}
 
+	// Validate cấu hình đánh giá
 	ec.validate()
 
+	// Parse query với cache để tối ưu hiệu năng
 	e, err := parsePromQLWithCache(q)
 	if err != nil {
 		return nil, err
 	}
 
+	// Kiểm tra và xử lý implicit conversion trong query
+	// Implicit conversion là quá trình tự động chuyển đổi kiểu dữ liệu không tường minh
+	// VD: sum(rate(metric)) -> sum(rate(metric[1m]))
 	if *disableImplicitConversion || *logImplicitConversion {
 		isInvalid := metricsql.IsLikelyInvalid(e)
 		if isInvalid && *disableImplicitConversion {
-			// we don't add query=%q to err message as it will be added by the caller
 			return nil, fmt.Errorf("query requires implicit conversion and is rejected according to -search.disableImplicitConversion command-line flag. " +
 				"See https://docs.victoriametrics.com/metricsql/#implicit-query-conversions for details")
 		}
@@ -67,22 +83,29 @@ func Exec(qt *querytracer.Tracer, ec *EvalConfig, q string, isFirstPointOnly boo
 		}
 	}
 
+	// Thêm query vào danh sách active queries và thực thi
 	qid := activeQueriesV.Add(ec, q)
 	rv, err := evalExpr(qt, ec, e)
 	activeQueriesV.Remove(qid)
 	if err != nil {
 		return nil, err
 	}
+
+	// Xử lý chế độ isFirstPointOnly - chỉ giữ lại điểm dữ liệu đầu tiên
 	if isFirstPointOnly {
-		// Remove all the points except the first one from every time series.
 		for _, ts := range rv {
 			ts.Values = ts.Values[:1]
 			ts.Timestamps = ts.Timestamps[:1]
 		}
 		qt.Printf("leave only the first point in every series")
 	}
+
+	// Sắp xếp kết quả nếu cần thiết
+	// maySort được xác định dựa trên loại biểu thức, ví dụ các hàm sort() luôn cần sắp xếp
 	maySort := maySortResults(e)
 	result, err := timeseriesToResult(rv, maySort)
+
+	// Kiểm tra giới hạn số lượng time series trong response
 	if *maxResponseSeries > 0 && len(result) > *maxResponseSeries {
 		return nil, fmt.Errorf("the response contains more than -search.maxResponseSeries=%d time series: %d series; either increase -search.maxResponseSeries "+
 			"or change the query in order to return smaller number of series", *maxResponseSeries, len(result))
@@ -90,11 +113,16 @@ func Exec(qt *querytracer.Tracer, ec *EvalConfig, q string, isFirstPointOnly boo
 	if err != nil {
 		return nil, err
 	}
+
+	// Log thông tin về việc sắp xếp
 	if maySort {
 		qt.Printf("sort series by metric name and labels")
 	} else {
 		qt.Printf("do not sort series by metric name and labels")
 	}
+
+	// Làm tròn các giá trị số nếu được yêu cầu
+	// RoundDigits < 100 chỉ định số chữ số thập phân cần giữ lại
 	if n := ec.RoundDigits; n < 100 {
 		for i := range result {
 			values := result[i].Values
@@ -104,6 +132,7 @@ func Exec(qt *querytracer.Tracer, ec *EvalConfig, q string, isFirstPointOnly boo
 		}
 		qt.Printf("round series values to %d decimal digits after the point", n)
 	}
+
 	return result, nil
 }
 
@@ -272,17 +301,33 @@ func getReverseCmpOp(op string) string {
 	}
 }
 
+// parsePromQLWithCache thực hiện parse chuỗi truy vấn PromQL với cơ chế cache.
+// Hàm này tối ưu hiệu năng bằng cách:
+// 1. Kiểm tra cache cho query string
+// 2. Nếu không có trong cache:
+//   - Parse query thành AST (Abstract Syntax Tree)
+//   - Optimize AST
+//   - Điều chỉnh các toán tử so sánh
+//   - Xử lý đặc biệt cho dấu chấm trong regex nếu cần
+//
+// 3. Lưu kết quả vào cache để tái sử dụng
 func parsePromQLWithCache(q string) (metricsql.Expr, error) {
+	// Thử lấy kết quả parse từ cache
 	pcv := parseCacheV.get(q)
 	if pcv == nil {
+		// Cache miss - thực hiện parse và optimize
 		e, err := metricsql.Parse(q)
 		if err == nil {
+			// Tối ưu hóa AST sau khi parse thành công
 			e = metricsql.Optimize(e)
+			// Điều chỉnh các toán tử so sánh (==, !=, =~, !~)
 			e = adjustCmpOps(e)
+			// Xử lý dấu chấm trong regex nếu cần
 			if *treatDotsAsIsInRegexps {
 				e = escapeDotsInRegexpLabelFilters(e)
 			}
 		}
+		// Lưu kết quả vào cache
 		pcv = &parseCacheValue{
 			e:   e,
 			err: err,

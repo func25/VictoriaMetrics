@@ -997,63 +997,98 @@ func QueryHandler(qt *querytracer.Tracer, startTime time.Time, at *auth.Token, w
 
 var queryDuration = metrics.NewSummary(`vm_request_duration_seconds{path="/api/v1/query"}`)
 
-// QueryRangeHandler processes /api/v1/query_range request.
+// QueryRangeHandler xử lý request API /api/v1/query_range.
+// Hàm này là entry point cho các truy vấn dữ liệu theo khoảng thời gian trong Prometheus API.
+// Nó validate các tham số đầu vào và chuyển tiếp xử lý cho queryRangeHandler.
 //
-// See https://prometheus.io/docs/prometheus/latest/querying/api/#range-queries
+// Tham khảo: https://prometheus.io/docs/prometheus/latest/querying/api/#range-queries
 func QueryRangeHandler(qt *querytracer.Tracer, startTime time.Time, at *auth.Token, w http.ResponseWriter, r *http.Request) error {
 	defer queryRangeDuration.UpdateDuration(startTime)
 
+	// Chuyển đổi thời gian hiện tại sang milliseconds
 	ct := startTime.UnixNano() / 1e6
+
+	// Lấy tham số query từ request, đây là biểu thức PromQL cần thực thi
 	query := r.FormValue("query")
 	if len(query) == 0 {
 		return fmt.Errorf("missing `query` arg")
 	}
+
+	// Lấy thời điểm bắt đầu của khoảng thời gian, mặc định là thời điểm hiện tại trừ đi defaultStep
 	start, err := httputils.GetTime(r, "start", ct-defaultStep)
 	if err != nil {
 		return err
 	}
+
+	// Lấy thời điểm kết thúc, mặc định là thời điểm hiện tại
 	end, err := httputils.GetTime(r, "end", ct)
 	if err != nil {
 		return err
 	}
+
+	// Lấy bước thời gian (step) giữa các điểm dữ liệu, mặc định là defaultStep
 	step, err := httputils.GetDuration(r, "step", defaultStep)
 	if err != nil {
 		return err
 	}
+
+	// Lấy các tag filters bổ sung từ request
 	etfs, err := searchutils.GetExtraTagFilters(r)
 	if err != nil {
 		return err
 	}
+
+	// Chuyển tiếp xử lý cho queryRangeHandler
 	if err := queryRangeHandler(qt, startTime, at, w, query, start, end, step, r, ct, etfs); err != nil {
 		return fmt.Errorf("error when executing query=%q on the time range (start=%d, end=%d, step=%d): %w", query, start, end, step, err)
 	}
 	return nil
 }
 
+// queryRangeHandler là hàm core để xử lý các truy vấn dữ liệu theo khoảng thời gian.
+// Hàm này thực hiện các nhiệm vụ chính:
+// - Validate các tham số đầu vào
+// - Thiết lập cấu hình đánh giá truy vấn
+// - Thực thi truy vấn PromQL
+// - Xử lý kết quả và gửi response
 func queryRangeHandler(qt *querytracer.Tracer, startTime time.Time, at *auth.Token, w http.ResponseWriter, query string,
 	start, end, step int64, r *http.Request, ct int64, etfs [][]storage.TagFilter) error {
+	// Lấy deadline cho query từ request
 	deadline := searchutils.GetDeadlineForQuery(r, startTime)
+
+	// Kiểm tra xem có được phép cache kết quả không
 	mayCache := !httputils.GetBool(r, "nocache")
+
+	// Lấy khoảng thời gian lookback tối đa
 	lookbackDelta, err := getMaxLookback(r)
 	if err != nil {
 		return err
 	}
 
-	// Validate input args.
+	// Validate độ dài của query
 	if len(query) > maxQueryLen.IntN() {
 		return fmt.Errorf("too long query; got %d bytes; mustn't exceed `-search.maxQueryLen=%d` bytes", len(query), maxQueryLen.N)
 	}
+
+	// Điều chỉnh end time nếu start > end
 	if start > end {
 		end = start + defaultStep
 	}
+
+	// Kiểm tra số điểm dữ liệu tối đa cho mỗi series
 	if err := promql.ValidateMaxPointsPerSeries(start, end, step, *maxPointsPerTimeseries); err != nil {
 		return fmt.Errorf("%w; (see -search.maxPointsPerTimeseries command-line flag)", err)
 	}
+
+	// Điều chỉnh start và end time nếu được phép cache
 	if mayCache {
 		start, end = promql.AdjustStartEnd(start, end, step)
 	}
 
+	// Khởi tạo QueryStats để theo dõi metrics của query
 	qs := &promql.QueryStats{}
+
+	// Thiết lập cấu hình đánh giá query
 	ec := &promql.EvalConfig{
 		Start:               start,
 		End:                 end,
@@ -1069,19 +1104,23 @@ func queryRangeHandler(qt *querytracer.Tracer, startTime time.Time, at *auth.Tok
 		GetRequestURI: func() string {
 			return httpserver.GetRequestURI(r)
 		},
-
 		DenyPartialResponse: httputils.GetDenyPartialResponse(r),
 		QueryStats:          qs,
 	}
+
+	// Thiết lập các auth tokens
 	err = populateAuthTokens(qt, ec, at, deadline)
 	if err != nil {
 		return fmt.Errorf("cannot populate auth tokens: %w", err)
 	}
 
+	// Thực thi query PromQL
 	result, err := promql.Exec(qt, ec, query, false)
 	if err != nil {
 		return err
 	}
+
+	// Điều chỉnh các điểm dữ liệu cuối cùng nếu step đủ nhỏ
 	if step < maxStepForPointsAdjustment.Milliseconds() {
 		queryOffset, err := getLatencyOffsetMilliseconds(r)
 		if err != nil {
@@ -1092,10 +1131,10 @@ func queryRangeHandler(qt *querytracer.Tracer, startTime time.Time, at *auth.Tok
 		}
 	}
 
-	// Remove NaN values as Prometheus does.
-	// See https://github.com/VictoriaMetrics/VictoriaMetrics/issues/153
+	// Loại bỏ các giá trị NaN như Prometheus
 	result = removeEmptyValuesAndTimeseries(result)
 
+	// Thiết lập header và gửi response
 	w.Header().Set("Content-Type", "application/json")
 	bw := bufferedwriter.Get(w)
 	defer bufferedwriter.Put(bw)
